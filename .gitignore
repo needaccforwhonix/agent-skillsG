@@ -1,8 +1,8 @@
+.claude/sdd-cache/
+.claude/.simplify-ignore-cache/
 .DS_Store
-node_modules/
 .env
 .env.*
-*.log
-.claude/.simplify-ignore-cache/
-.claude/sdd-cache/
 evals/results/
+*.log
+node_modules/
