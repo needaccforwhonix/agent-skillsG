@@ -1,0 +1,8 @@
+.claude/sdd-cache/
+.claude/.simplify-ignore-cache/
+.DS_Store
+.env
+.env.*
+evals/results/
+*.log
+node_modules/

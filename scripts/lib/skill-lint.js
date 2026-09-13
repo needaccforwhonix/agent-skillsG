@@ -34,7 +34,10 @@ const KEBAB_CASE = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 // A description must state WHEN to use the skill, not just what it does
 // (docs/skill-anatomy.md → Required). Accept the canonical "Use when …"
 // plus the equivalent "Use before/after/during …" phrasings in use today.
-const DESCRIPTION_TRIGGER = /\buse (this )?when\b|\buse (before|after|during)\b/i;
+// Reject negated forms ("Do not use when …", "Don't use when …") — those
+// describe exclusions, not trigger conditions.
+const DESCRIPTION_TRIGGER        = /\buse (this )?when\b|\buse (before|after|during)\b/i;
+const DESCRIPTION_TRIGGER_NEGATE = /\b(do not|don't|never) use (this )?(when|before|after|during)\b/i;
 
 // Sections every standard SKILL.md must contain.
 // Each entry is an array of acceptable heading strings — the first
@@ -73,6 +76,14 @@ const SKILL_REF_PATTERNS = [
 ];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Strip fenced code blocks from markdown content so that headings, references,
+ * and trigger phrases inside examples or templates are not matched by lint rules.
+ */
+function stripFencedCodeBlocks(content) {
+  return content.replace(/^(`{3,})[^\n]*\n[\s\S]*?^\1\s*$/gm, '');
+}
 
 /**
  * Parse YAML-style frontmatter from the top of a markdown file.
@@ -150,7 +161,10 @@ function lintSkillContent(dirName, content, knownSkills) {
         ` (agents inject this into the system prompt)`
       );
     }
-    if (!DESCRIPTION_TRIGGER.test(fm.description)) {
+    const hasTrigger       = DESCRIPTION_TRIGGER.test(fm.description);
+    const onlyNegated      = hasTrigger && DESCRIPTION_TRIGGER_NEGATE.test(fm.description)
+      && !fm.description.replace(DESCRIPTION_TRIGGER_NEGATE, '').match(DESCRIPTION_TRIGGER);
+    if (!hasTrigger || onlyNegated) {
       errors.push(
         `Description has no 'when to use' trigger — add a "Use when …" clause ` +
         `(skill-anatomy.md: Required — the description must say both what the skill does and when to use it)`
@@ -163,7 +177,7 @@ function lintSkillContent(dirName, content, knownSkills) {
   // If a skill's frontmatter tries to declare its own exemption, fail loud —
   // that's a sign someone is trying to bypass the validator.
   if (fm.type === 'meta' || fm.exempt === 'sections') {
-    if (!SECTION_EXEMPT_SKILLS[dirName]) {
+    if (!Object.hasOwn(SECTION_EXEMPT_SKILLS, dirName)) {
       errors.push(
         `Frontmatter declares 'type: meta' or 'exempt: sections' but '${dirName}' is not in ` +
         `the validator's SECTION_EXEMPT_SKILLS allowlist. ` +
@@ -173,13 +187,45 @@ function lintSkillContent(dirName, content, knownSkills) {
   }
 
   // ── Required sections ────────────────────────────────────────────────────
-  exempt = dirName in SECTION_EXEMPT_SKILLS;
+  // `Object.hasOwn`, not `in`: `in` walks the prototype chain, so a skill
+  // directory named `constructor` — which passes the kebab-case check — would
+  // otherwise resolve to Object.prototype.constructor and be silently exempt
+  // from every required-section check.
+  exempt = Object.hasOwn(SECTION_EXEMPT_SKILLS, dirName);
 
   if (!exempt) {
+    // Strip fenced code blocks so headings inside examples/templates don't
+    // satisfy the check, and match headings at the start of a line so
+    // `### Verification` inside a block doesn't satisfy `## Verification`.
+    const proseContent = stripFencedCodeBlocks(content);
     for (const aliases of REQUIRED_SECTIONS) {
-      const found = aliases.some(heading => content.includes(heading));
+      const found = aliases.some(heading => {
+        const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return new RegExp(`^${escaped}\\s*$`, 'm').test(proseContent);
+      });
       if (!found) {
         errors.push(`Missing required section: ${aliases[0]}`);
+      }
+    }
+  }
+
+  // A named workflow that advertises numbered steps must document each step
+  // before the next level-two section. Otherwise the summary promises a
+  // process stage that the skill never teaches agents how to perform.
+  const workflowSections = content.matchAll(
+    /^## The [^\n]+ Workflow\s*\r?\n([\s\S]*?)(?=^## |(?![\s\S]))/gm
+  );
+  for (const match of workflowSections) {
+    const section = match[1];
+    const declared = [...section.matchAll(/^\s*(\d+)\.\s+[A-Z][A-Z -]*\s+→/gm)];
+    if (declared.length < 2) continue;
+
+    const documented = new Set(
+      [...section.matchAll(/^### Step\s+(\d+):/gm)].map(step => step[1])
+    );
+    for (const step of declared) {
+      if (!documented.has(step[1])) {
+        errors.push(`Workflow declares Step ${step[1]} but has no matching process section`);
       }
     }
   }
